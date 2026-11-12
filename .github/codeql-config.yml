@@ -1,0 +1,38 @@
+name: "Stitch & Style CodeQL Config"
+
+queries:
+  - uses: security-extended
+  - uses: security-and-quality
+
+paths:
+  - .
+  - frontend-next
+
+paths-ignore:
+  - node_modules
+  - .next
+  - dist
+  - build
+  - coverage
+  - .vercel
+  - __tests__
+  - tests
+  - test
+  - __mocks__
+  - jest.config.js
+  - jest.setup.js
+  - *.test.js
+  - *.test.ts
+  - *.spec.js
+  - *.spec.ts
+
+# Exclude test files from security analysis
+exclude-paths:
+  - "**/__tests__/**"
+  - "**/test/**"
+  - "**/tests/**"
+  - "**/*.test.*"
+  - "**/*.spec.*"
+
+# Custom queries for specific patterns
+# We can add custom queries here if needed
