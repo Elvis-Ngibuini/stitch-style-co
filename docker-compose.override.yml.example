@@ -1,0 +1,29 @@
+# =============================================================================
+# Docker Compose Override - Local Development Customizations
+# This file is automatically loaded by docker-compose
+# Copy to docker-compose.override.yml and customize as needed
+# =============================================================================
+
+version: '3.8'
+
+services:
+  backend:
+    # Override for local development
+    # Uncomment to use local MongoDB instead of containerized
+    # environment:
+    #   MONGO_URI: mongodb://host.docker.internal:27017/stitch-style-co-dev
+    # depends_on: []
+
+  frontend:
+    # Override for local development
+    # environment:
+    #   NEXT_PUBLIC_API_URL: http://host.docker.internal:5006/api
+
+  # Add debugging tools
+  # debug:
+  #   image: busybox
+  #   command: sleep infinity
+  #   network_mode: "service:backend"
+
+# Enable BuildKit for faster builds
+# DOCKER_BUILDKIT=1 docker-compose build

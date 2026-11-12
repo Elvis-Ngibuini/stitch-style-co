@@ -1,0 +1,266 @@
+# =============================================================================
+# Docker Compose - Staging Environment
+# =============================================================================
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # MongoDB - Staging Database
+  # ---------------------------------------------------------------------------
+  mongodb:
+    image: mongo:7.0
+    container_name: stitch-mongodb-staging
+    restart: always
+    environment:
+      MONGO_INITDB_DATABASE: stitch-style-co-staging
+      MONGO_INITDB_ROOT_USERNAME: ${STAGING_MONGO_USER:-staginguser}
+      MONGO_INITDB_ROOT_PASSWORD: ${STAGING_MONGO_PASSWORD}
+    # No port exposure - internal only
+    volumes:
+      - mongodb-staging-data:/data/db
+      - mongodb-staging-config:/data/configdb
+    networks:
+      - stitch-network-staging
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Redis - Staging Cache
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: stitch-redis-staging
+    restart: always
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    # No port exposure - internal only
+    volumes:
+      - redis-staging-data:/data
+    networks:
+      - stitch-network-staging
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # ---------------------------------------------------------------------------
+  # Backend API - Staging
+  # ---------------------------------------------------------------------------
+  backend:
+    image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_NAMESPACE:-stitch-style}/backend:${BACKEND_TAG:-latest}
+    container_name: stitch-backend-staging
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 5006
+      MONGO_URI: mongodb://${STAGING_MONGO_USER:-staginguser}:${STAGING_MONGO_PASSWORD}@mongodb:27017/stitch-style-co-staging?authSource=admin
+      JWT_SECRET: ${STAGING_JWT_SECRET}
+      JWT_REFRESH_SECRET: ${STAGING_JWT_REFRESH_SECRET}
+      JWT_EXPIRE: 15m
+      JWT_REFRESH_EXPIRE: 7d
+      STRIPE_SECRET_KEY: ${STAGING_STRIPE_SECRET_KEY}
+      STRIPE_PUBLISHABLE_KEY: ${STAGING_STRIPE_PUBLISHABLE_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STAGING_STRIPE_WEBHOOK_SECRET}
+      FRONTEND_URL: ${STAGING_FRONTEND_URL:-https://staging.stitchstyle.co}
+      REDIS_URL: redis://redis:6379
+      EMAIL_HOST: ${STAGING_EMAIL_HOST}
+      EMAIL_PORT: ${STAGING_EMAIL_PORT:-587}
+      EMAIL_USER: ${STAGING_EMAIL_USER}
+      EMAIL_PASS: ${STAGING_EMAIL_PASS}
+      EMAIL_FROM: ${STAGING_EMAIL_FROM}
+    # No port exposure - behind reverse proxy
+    volumes:
+      - uploads-staging:/app/uploads
+      - logs-staging:/app/logs
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - stitch-network-staging
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 30s
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.backend.rule=Host(`api.staging.stitchstyle.co`)"
+        - "traefik.http.routers.backend.entrypoints=websecure"
+        - "traefik.http.routers.backend.tls.certresolver=letsencrypt"
+        - "traefik.http.services.backend.loadbalancer.server.port=5006"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Frontend - Staging
+  # ---------------------------------------------------------------------------
+  frontend:
+    image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_NAMESPACE:-stitch-style}/frontend:${FRONTEND_TAG:-latest}
+    container_name: stitch-frontend-staging
+    restart: always
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: https://api.staging.stitchstyle.co/api
+      NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: ${STAGING_STRIPE_PUBLISHABLE_KEY}
+      NEXT_TELEMETRY_DISABLED: "1"
+    # No port exposure - behind reverse proxy
+    volumes:
+      - logs-staging-frontend:/app/logs
+    depends_on:
+      - backend
+    networks:
+      - stitch-network-staging
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 30s
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.frontend.rule=Host(`staging.stitchstyle.co`)"
+        - "traefik.http.routers.frontend.entrypoints=websecure"
+        - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+        - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Nginx Reverse Proxy (Alternative to Traefik)
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: stitch-nginx-staging
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/staging.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl/staging:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - stitch-network-staging
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  stitch-network-staging:
+    driver: bridge
+    name: stitch-staging-network
+    driver_opts:
+      com.docker.network.bridge.name: br-staging
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  mongodb-staging-data:
+    name: stitch-mongodb-staging-data
+    driver: local
+  mongodb-staging-config:
+    name: stitch-mongodb-staging-config
+    driver: local
+  redis-staging-data:
+    name: stitch-redis-staging-data
+    driver: local
+  uploads-staging:
+    name: stitch-uploads-staging
+    driver: local
+  logs-staging:
+    name: stitch-logs-staging
+    driver: local
+  logs-staging-frontend:
+    name: stitch-logs-staging-frontend
+    driver: local

@@ -1,0 +1,94 @@
+# =============================================================================
+# Backend .dockerignore
+# Exclude files not needed in Docker build context
+# =============================================================================
+
+# Git
+.git
+.gitignore
+.github
+
+# Documentation
+*.md
+!README.md
+CHANGELOG.md
+LICENSE
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# Build outputs
+dist
+build
+.next
+out
+
+# Test & Coverage
+coverage
+.nyc_output
+__tests__
+tests
+test
+*.test.js
+*.test.ts
+*.spec.js
+*.spec.ts
+jest.config.js
+jest.setup.js
+
+# IDE & Editor
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Cache
+.cache
+.eslintcache
+.stylelintcache
+.tsbuildinfo
+
+# Docker
+.dockerignore
+Dockerfile*
+docker-compose*
+.docker/
+
+# Misc
+*.pem
+.vercel
+.netlify
+*.pid
+*.seed
+*.pid.lock
+
+# Uploads (runtime generated)
+uploads/*
+
+# Seeds & Scripts
+seed-*.js
+seeder.js
+test-db.js
+
+# Config (if not needed in container)
+config/env.js

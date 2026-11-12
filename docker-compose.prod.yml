@@ -1,0 +1,559 @@
+# =============================================================================
+# Docker Compose - Production Environment
+# =============================================================================
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#        OR: docker stack deploy -c docker-compose.prod.yml stitch-style
+# =============================================================================
+
+version: '3.8'
+
+# =============================================================================
+# External Secrets (Docker Secrets)
+# =============================================================================
+# These secrets should be created externally:
+# echo "your-jwt-secret" | docker secret create prod_jwt_secret -
+# echo "your-refresh-secret" | docker secret create prod_jwt_refresh_secret -
+# echo "sk_live_..." | docker secret create prod_stripe_secret_key -
+# echo "pk_live_..." | docker secret create prod_stripe_publishable_key -
+# echo "whsec_..." | docker secret create prod_stripe_webhook_secret -
+# echo "mongodb+srv://..." | docker secret create prod_mongo_uri -
+# echo "redis-password" | docker secret create prod_redis_password -
+
+# =============================================================================
+# Configs (Docker Configs)
+# =============================================================================
+# docker config create nginx_prod_conf ./nginx/production.conf
+
+# =============================================================================
+# Services
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # MongoDB - Production (Use MongoDB Atlas in production instead)
+  # This is for self-hosted MongoDB only
+  # ---------------------------------------------------------------------------
+  mongodb:
+    image: mongo:7.0
+    container_name: stitch-mongodb-prod
+    restart: always
+    environment:
+      MONGO_INITDB_DATABASE: stitch-style-co-prod
+      MONGO_INITDB_ROOT_USERNAME_FILE: /run/secrets/prod_mongo_user
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/prod_mongo_password
+    # No port exposure - internal only
+    volumes:
+      - mongodb-prod-data:/data/db
+      - mongodb-prod-config:/data/configdb
+    networks:
+      - stitch-network-prod
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+    secrets:
+      - prod_mongo_user
+      - prod_mongo_password
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  # ---------------------------------------------------------------------------
+  # Redis Cluster - Production Cache
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: stitch-redis-prod
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD_FILE}
+    volumes:
+      - redis-prod-data:/data
+    networks:
+      - stitch-network-prod
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  # ---------------------------------------------------------------------------
+  # Backend API - Production
+  # ---------------------------------------------------------------------------
+  backend:
+    image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_NAMESPACE:-stitch-style}/backend:${BACKEND_TAG:-latest}
+    container_name: stitch-backend-prod
+    environment:
+      NODE_ENV: production
+      PORT: 5006
+      MONGO_URI_FILE: /run/secrets/prod_mongo_uri
+      JWT_SECRET_FILE: /run/secrets/prod_jwt_secret
+      JWT_REFRESH_SECRET_FILE: /run/secrets/prod_jwt_refresh_secret
+      JWT_EXPIRE: 15m
+      JWT_REFRESH_EXPIRE: 7d
+      STRIPE_SECRET_KEY_FILE: /run/secrets/prod_stripe_secret_key
+      STRIPE_PUBLISHABLE_KEY_FILE: /run/secrets/prod_stripe_publishable_key
+      STRIPE_WEBHOOK_SECRET_FILE: /run/secrets/prod_stripe_webhook_secret
+      FRONTEND_URL: https://stitchstyle.co
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      EMAIL_HOST: ${PROD_EMAIL_HOST}
+      EMAIL_PORT: ${PROD_EMAIL_PORT:-587}
+      EMAIL_USER_FILE: /run/secrets/prod_email_user
+      EMAIL_PASS_FILE: /run/secrets/prod_email_pass
+      EMAIL_FROM: ${PROD_EMAIL_FROM}
+    volumes:
+      - uploads-prod:/app/uploads
+      - logs-prod:/app/logs
+    networks:
+      - stitch-network-prod
+    deploy:
+      replicas: 4
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 60s
+      update_config:
+        parallelism: 2
+        delay: 15s
+        failure_action: rollback
+        monitor: 60s
+        max_failure_ratio: 0.1
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: pause
+        monitor: 60s
+      placement:
+        constraints:
+          - node.role == worker
+        preferences:
+          - spread: node.id
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.backend.rule=Host(`api.stitchstyle.co`)"
+        - "traefik.http.routers.backend.entrypoints=websecure"
+        - "traefik.http.routers.backend.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.backend.middlewares=security-headers@file"
+        - "traefik.http.services.backend.loadbalancer.server.port=5006"
+        - "traefik.http.services.backend.loadbalancer.sticky.cookie=true"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    secrets:
+      - prod_mongo_uri
+      - prod_jwt_secret
+      - prod_jwt_refresh_secret
+      - prod_stripe_secret_key
+      - prod_stripe_publishable_key
+      - prod_stripe_webhook_secret
+      - prod_email_user
+      - prod_email_pass
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "20"
+        compress: "true"
+
+  # ---------------------------------------------------------------------------
+  # Frontend - Production
+  # ---------------------------------------------------------------------------
+  frontend:
+    image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_NAMESPACE:-stitch-style}/frontend:${FRONTEND_TAG:-latest}
+    container_name: stitch-frontend-prod
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: https://api.stitchstyle.co/api
+      NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY_FILE: /run/secrets/prod_stripe_publishable_key
+      NEXT_TELEMETRY_DISABLED: "1"
+    volumes:
+      - logs-prod-frontend:/app/logs
+    networks:
+      - stitch-network-prod
+    deploy:
+      replicas: 4
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+      update_config:
+        parallelism: 2
+        delay: 15s
+        failure_action: rollback
+        monitor: 60s
+        max_failure_ratio: 0.1
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: pause
+        monitor: 60s
+      placement:
+        constraints:
+          - node.role == worker
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.frontend.rule=Host(`stitchstyle.co`,`www.stitchstyle.co`)"
+        - "traefik.http.routers.frontend.entrypoints=websecure"
+        - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.frontend.middlewares=security-headers@file,www-redirect@file"
+        - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+        - "traefik.http.services.frontend.loadbalancer.sticky.cookie=true"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    secrets:
+      - prod_stripe_publishable_key
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "20"
+        compress: "true"
+
+  # ---------------------------------------------------------------------------
+  # Traefik Reverse Proxy - Production
+  # ---------------------------------------------------------------------------
+  traefik:
+    image: traefik:v3.0
+    container_name: stitch-traefik-prod
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.swarmmode=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls.certresolver=letsencrypt"
+      - "--certificatesresolvers.letsencrypt.acme.email=admin@stitchstyle.co"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--log.level=INFO"
+      - "--accesslog=true"
+      - "--accesslog.format=json"
+    ports:
+      - target: 80
+        published: 80
+        mode: host
+      - target: 443
+        published: 443
+        mode: host
+      - target: 8080
+        published: 8080
+        mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-letsencrypt:/letsencrypt
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+    networks:
+      - stitch-network-prod
+    deploy:
+      replicas: 2
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.stitchstyle.co`)"
+        - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
+        - "traefik.http.routers.traefik-dashboard.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.traefik-dashboard.middlewares=auth@file"
+        - "traefik.http.services.traefik-dashboard.loadbalancer.server.port=8080"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  # ---------------------------------------------------------------------------
+  # Prometheus - Metrics Collection
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.47
+    container_name: stitch-prometheus-prod
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - stitch-network-prod
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Grafana - Visualization
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.1
+    container_name: stitch-grafana-prod
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD_FILE: /run/secrets/grafana_admin_password
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - stitch-network-prod
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    secrets:
+      - grafana_admin_password
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Loki - Log Aggregation
+  # ---------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:2.9
+    container_name: stitch-loki-prod
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki/local-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    networks:
+      - stitch-network-prod
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Promtail - Log Shipper
+  # ---------------------------------------------------------------------------
+  promtail:
+    image: grafana/promtail:2.9
+    container_name: stitch-promtail-prod
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./promtail/promtail-config.yaml:/etc/promtail/config.yml:ro
+    networks:
+      - stitch-network-prod
+    deploy:
+      mode: global
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  stitch-network-prod:
+    driver: overlay
+    name: stitch-prod-network
+    attachable: true
+    driver_opts:
+      com.docker.network.driver.mtu: "1500"
+      encrypted: "true"
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  mongodb-prod-data:
+    name: stitch-mongodb-prod-data
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/mongodb
+  mongodb-prod-config:
+    name: stitch-mongodb-prod-config
+    driver: local
+  redis-prod-data:
+    name: stitch-redis-prod-data
+    driver: local
+  uploads-prod:
+    name: stitch-uploads-prod
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/uploads
+  logs-prod:
+    name: stitch-logs-prod
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/logs/backend
+  logs-prod-frontend:
+    name: stitch-logs-prod-frontend
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/logs/frontend
+  prometheus-data:
+    name: stitch-prometheus-prod-data
+    driver: local
+  grafana-data:
+    name: stitch-grafana-prod-data
+    driver: local
+  loki-data:
+    name: stitch-loki-prod-data
+    driver: local
+  traefik-letsencrypt:
+    name: stitch-traefik-letsencrypt
+    driver: local
+
+# =============================================================================
+# Secrets (External - Create with docker secret create)
+# =============================================================================
+secrets:
+  prod_mongo_user:
+    external: true
+  prod_mongo_password:
+    external: true
+  prod_mongo_uri:
+    external: true
+  prod_jwt_secret:
+    external: true
+  prod_jwt_refresh_secret:
+    external: true
+  prod_stripe_secret_key:
+    external: true
+  prod_stripe_publishable_key:
+    external: true
+  prod_stripe_webhook_secret:
+    external: true
+  prod_email_user:
+    external: true
+  prod_email_pass:
+    external: true
+  grafana_admin_password:
+    external: true
+  # Redis password
+  prod_redis_password:
+    external: true
+
+# =============================================================================
+# Configs (External - Create with docker config create)
+# =============================================================================
+configs:
+  nginx_prod_conf:
+    external: true
+  traefik_dynamic_conf:
+    external: true
+  prometheus_config:
+    external: true
+  loki_config:
+    external: true
+  promtail_config:
+    external: true
