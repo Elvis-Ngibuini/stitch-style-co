@@ -41,7 +41,7 @@
     "@types/supertest": "^7.2.1",
     "cross-port-killer": "^1.4.0",
     "gitleaks": "^1.0.0",
-    "jest": "^29.7.0",
+    "jest": "^30.5.2",
     "nodemon": "^3.1.0",
     "semantic-release": "^25.0.9",
     "supertest": "^7.3.2"
