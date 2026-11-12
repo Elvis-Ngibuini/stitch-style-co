@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - release/*
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    if: github.repository == 'elvis/stitch-style-co'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: ./frontend-next
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run frontend tests
+        run: npm test
+        working-directory: ./frontend-next
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: ./frontend-next
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:5006/api
+          NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: pk_test_fake
+
+      - name: Semantic Release
+        uses: cycjimmy/semantic-release-action@v4
+        id: semantic
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        with:
+          extra_plugins: |
+            @semantic-release/changelog
+            @semantic-release/git
+            @semantic-release/github
+
+      - name: Create Release Tag
+        if: steps.semantic.outputs.new_release_published == 'true'
+        run: |
+          echo "New release published: ${{ steps.semantic.outputs.new_release_version }}"
+          echo "Release notes: ${{ steps.semantic.outputs.new_release_notes }}"
+
+      - name: Notify Slack
+        if: steps.semantic.outputs.new_release_published == 'true'
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"🚀 New release published: ${{ steps.semantic.outputs.new_release_version }}\n${{ steps.semantic.outputs.new_release_notes }}"}' \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
