@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@stripe/react-stripe-js": "^7.0.1",
-    "@stripe/stripe-js": "^10.2.1",
+    "@stripe/stripe-js": "^10.3.0",
     "@tanstack/react-query": "^5.107.1",
     "autoprefixer": "^10.6.2",
     "clsx": "^2.1.1",
